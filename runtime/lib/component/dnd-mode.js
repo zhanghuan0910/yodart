@@ -47,13 +47,13 @@ class DNDCommon {
     this.life = life
     this.sound = sound
     this.light = light
+    this.setVolumeFlag = false
   }
   /**
    * Disable dnd mode
    * @function disable
    */
   disable () {
-    // TODO volume changed event
     var volume = DNDCommon.getSavedVolume()
     if (volume !== 0) {
       this.sound.setVolume(volume)
@@ -62,6 +62,19 @@ class DNDCommon {
     this.light.setDNDMode(false)
     DNDCommon.setStatus('off')
     DNDCommon.setAwakeSwitch('open')
+    logger.info('dnd mode turned off')
+  }
+
+  isVolumeChanging () {
+    return this.setVolumeFlag
+  }
+
+  volumeChangingEnd () {
+    this.setVolumeFlag = false
+  }
+
+  volumeChangingStart () {
+    this.setVolumeFlag = true
   }
 
   /**
@@ -71,12 +84,15 @@ class DNDCommon {
   enable () {
     var curVolume = this.sound.getVolume()
     if (DND_MODE_VOLUME < curVolume) {
+      this.volumeChangingStart()
       this.sound.setVolume(DND_MODE_VOLUME)
       DNDCommon.setSavedVolume(curVolume)
+      logger.info(`save volume [${curVolume}%]`)
     }
     this.light.setDNDMode(true)
     DNDCommon.setStatus('on')
     DNDCommon.setAwakeSwitch('close')
+    logger.info('dnd mode turned on')
   }
 
   /**
@@ -86,20 +102,32 @@ class DNDCommon {
    *                   - if result < 0, it's the millisecond to start time
    */
   static getDNDTime () {
+    function formatDate (dt) {
+      return `${dt.getFullYear()}-${dt.getMonth() + 1}-${dt.getDay()} ${dt.getHours()}:${dt.getMinutes()}:${dt.getSeconds()}`
+    }
     var now = new Date()
+    now.setHours(now.getHours() + now.getTimezoneOffset() / 60)
     var start = DNDCommon.formatTime(DNDCommon.getStartTime(), 22, 0)
     var end = DNDCommon.formatTime(DNDCommon.getEndTime(), 7, 0)
-    if (start > end) {
+    if (start >= end) {
       end.setDate(end.getDate() + 1)
     }
-    logger.info(`check time now:${Number(now)}   start:${Number(start)}   end:${Number(end)}`)
+    logger.info(`check utc time now:${formatDate(now)}   start:${formatDate(start)}   end:${formatDate(end)}`)
     if (now >= start && now < end) {
       return end - now
-    } else if (now < start) {
-      return now - start
-    } else if (now >= end) {
-      start.setDate(start.getDate() + 1)
-      return now - start
+    } else {
+      var nowPlusDay = new Date()
+      nowPlusDay.setHours(nowPlusDay.getHours() + nowPlusDay.getTimezoneOffset() / 60)
+      nowPlusDay.setDate(nowPlusDay.getDate() + 1)
+      logger.info(`check utc time nowPlusDay:${formatDate(nowPlusDay)}   start:${formatDate(start)}   end:${formatDate(end)}`)
+      if (nowPlusDay >= start && nowPlusDay < end) {
+        return nowPlusDay - now
+      } else if (now < start) {
+        return now - start
+      } else {
+        start.setDate(start.getDate() + 1)
+        return now - start
+      }
     }
   }
 
@@ -235,7 +263,6 @@ class DNDCommon {
    */
   static formatTime (timeStr, defaultHour, defaultMinute) {
     var d = new Date()
-    var curTimeZone = -(d.getTimezoneOffset() / 60)
     d.setSeconds(0)
     d.setMilliseconds(0)
     var hour = defaultHour
@@ -253,7 +280,7 @@ class DNDCommon {
     }
     d.setHours(hour)
     // TODO custom-config should add timeZone
-    d.setHours(d.getHours() + curTimeZone - TIME_ZONE)
+    d.setHours(d.getHours() - TIME_ZONE)
     d.setMinutes(minute)
     return d
   }
@@ -278,6 +305,7 @@ class DNDMode {
     var light = runtime.component.light
     var life = runtime.component.lifetime
     var sound = runtime.component.sound
+    runtime.component.flora.subscribe('yodart.audio.on-volume-change', this.onVolumeChanged.bind(this))
     this.common = new DNDCommon(light, sound, life)
     this.fsmStatus = FSM_READY
     this.fsmTimer = undefined
@@ -288,6 +316,24 @@ class DNDMode {
   }
 
   /**
+   * volume changed event handler
+   * @param {array} msg -
+   */
+  onVolumeChanged (msg) {
+    if (DNDCommon.getStatus() === 'on') {
+      var stream = msg[0]
+      var volume = msg[1]
+      if (stream === 'system') {
+        if (this.common.isVolumeChanging()) {
+          this.common.volumeChangingEnd()
+        } else {
+          DNDCommon.setSavedVolume(volume)
+          logger.info(`onVolumeChanged: save volume [${volume}%]`)
+        }
+      }
+    }
+  }
+  /**
    * when the device changes from active to idle, this function will be triggered
    * @function onDeviceIdle
    */
@@ -295,11 +341,9 @@ class DNDMode {
     if (this.waitSleep && this.fsmStatus === FSM_WAITING) {
       this.waitSleep = false
       if (this.fsmWaitingBreaker) {
-        logger.info('fsm waiting break : device is idle')
+        logger.info('device is idle, recheck dnd mode')
         this.fsmWaitingBreaker()
       }
-    } else if (this.fsmStatus === FSM_END) {
-      this.start(FSMCode.Start)
     }
   }
   /**
@@ -327,7 +371,7 @@ class DNDMode {
 
     DNDCommon.setStartTime(startTime)
     DNDCommon.setEndTime(endTime)
-    logger.info(`setOption in, fsm status is ${this.fsmStatus}`)
+    logger.info(`dnd mode config changed, recheck dnd mode`)
     this.isOptionBreaker = true
     if (this.fsmStatus === FSM_WAITING) {
       if (this.fsmWaitingBreaker) {
@@ -343,10 +387,10 @@ class DNDMode {
   }
 
   /**
-   * recheck dnd mode
+   * recheck dnd mode because of date synchronization
    */
   recheck () {
-    logger.info(`recheck dnd mode, fsm status is ${this.fsmStatus}`)
+    logger.info(`time synchronized, recheck dnd mode`)
     if (this.fsmStatus === FSM_WAITING) {
       if (this.fsmWaitingBreaker) {
         logger.info('fsm waiting break')
@@ -549,10 +593,23 @@ class DNDMode {
    */
   setTimeout (code) {
     var waitMs = DNDCommon.getDNDTime()
+    this.waitSleep = (code === FSMCode.CheckActivityTrue || code === FSMCode.CheckActivityTrueX)
+    if (!this.waitSleep) {
+      if (waitMs >= 0) {
+        logger.info(`waiting to exit night mode, timeout:[${waitMs / 1000}s]`)
+      } else {
+        logger.info(`waiting to enter night mode, timeout:[${-waitMs / 1000}s]`)
+      }
+    } else {
+      if (waitMs < 0) {
+        logger.info(`wait for sleeping to turn on`)
+      } else {
+        logger.info(`wait for sleeping to turn off`)
+      }
+    }
     if (waitMs < 0) {
       waitMs = -waitMs
     }
-    this.waitSleep = (code === FSMCode.CheckActivityTrue || code === FSMCode.CheckActivityTrueX)
     this.fsmTimer = setTimeout(() => {
       this.start(FSMCode.CheckAgain)
     }, waitMs)

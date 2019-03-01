@@ -2,12 +2,14 @@ var logger = require('logger')('custodian')
 var property = require('@yoda/property')
 var wifi = require('@yoda/wifi')
 var _ = require('@yoda/util')._
+var WIFI_TIMEOUT_SECS = 15
 
 module.exports = Custodian
 function Custodian (runtime) {
   wifi.enableScanPassively()
   this.runtime = runtime
   this.component = runtime.component
+  this.promptTimer = null
 
   /**
    * set this._networkConnected = undefined at initial to
@@ -35,6 +37,11 @@ Custodian.prototype.onNetworkConnect = function onNetworkConnect () {
   if (this._networkConnected || this._checkingNetwork) {
     return
   }
+  if (this.promptTimer !== null) {
+    clearTimeout(this.promptTimer)
+    this.promptTimer = null
+  }
+
   property.set('state.network.connected', 'true')
 
   this._networkConnected = true
@@ -53,13 +60,11 @@ Custodian.prototype.onNetworkConnect = function onNetworkConnect () {
     this.runtime.reconnect()
   })
 
-  if (this.component.scheduler) {
-    var appMap = this.component.scheduler.appMap
-    Object.keys(appMap).forEach(key => {
-      var activity = appMap[key]
-      activity.emit('internal:network-connected')
-    })
-  }
+  var appMap = this.component.appScheduler.appMap
+  Object.keys(appMap).forEach(key => {
+    var activity = appMap[key]
+    activity.emit('internal:network-connected')
+  })
 }
 
 /**
@@ -97,17 +102,15 @@ Custodian.prototype.onLoggedIn = function onLoggedIn () {
   this._loggedIn = true
   property.set('state.rokid.logged', 'true')
   logger.info('on logged in')
+  wifi.save()
 }
 
 Custodian.prototype.onLogout = function onLogout () {
   this._loggedIn = false
   this.component.wormhole.setOffline()
   property.set('state.rokid.logged', 'false')
-  // reset the onGetPropAll...
-  this.runtime.onGetPropAll = function () {
-    return {}
-  }
-  logger.info('on logged out and clear the onGetPropAll state')
+  this.runtime.credential = {}
+  logger.info('on logged out and clear the credential state')
 }
 
 /**
@@ -172,7 +175,78 @@ Custodian.prototype.prepareNetwork = function prepareNetwork () {
   }
   if (wifi.getNumOfHistory() > 0) {
     logger.info('has histroy wifi, just skip')
+    if (this.promptTimer !== null) {
+      clearTimeout(this.promptTimer)
+    }
+    this.promptTimer = setTimeout(player => {
+      player.ttsSound('@yoda', 'system://guide_reconfig_network.ogg')
+    }, WIFI_TIMEOUT_SECS * 1000, this.component.light)
     return
   }
   return this.onNetworkDisconnect()
 }
+
+Custodian.prototype.resetState = function resetState () {
+  /**
+   * set this._networkConnected = undefined at initial to
+   * prevent discarding of very first of network disconnect event.
+   */
+  this._networkConnected = undefined
+}
+
+// MARK: - Interception
+Custodian.prototype.turenDidWakeUp = function turenDidWakeUp () {
+  if (this.isPrepared()) {
+    return
+  }
+  logger.warn('Network not connected, preparing to announce unavailability.')
+  this.component.turen.pickup(false)
+
+  var currentAppId = this.component.lifetime.getCurrentAppId()
+  if (this.component.custodian.isConfiguringNetwork()) {
+    /**
+     * Configuring network, delegates event to network app.
+     */
+    logger.info('configuring network, renewing timer.')
+    return this.runtime.openUrl('yoda-skill://network/renew')
+  }
+
+  if (wifi.getNumOfHistory() === 0) {
+    if (currentAppId) {
+      /**
+       * although there is no WiFi history, yet some app is running out there,
+       * continuing currently app.
+       */
+      logger.info('no WiFi history exists, continuing currently running app.')
+      return this.component.light.ttsSound('@yoda', 'system://guide_config_network.ogg')
+        .then(() =>
+        /** awaken is not set for no network available, recover media directly */
+          this.component.turen.recoverPausedOnAwaken()
+        )
+    }
+    /**
+     * No WiFi connection history found, introduce device setup procedure.
+     */
+    logger.info('no WiFi history exists, announcing guide to network configuration.')
+    return this.component.light.ttsSound('@yoda', 'system://guide_config_network.ogg')
+      .then(() =>
+        /** awaken is not set for no network available, recover media directly */
+        this.component.turen.recoverPausedOnAwaken()
+      )
+  }
+
+  /**
+   * if runtime is logging in or network is unavailable,
+   * and there is WiFi history existing,
+   * announce WiFi is connecting.
+   */
+  logger.info('announcing network connecting on voice coming.')
+  wifi.enableScanPassively()
+  return this.component.light.ttsSound('@yoda', 'system://wifi_is_connecting.ogg')
+    .then(() =>
+      /** awaken is not set for no network available, recover media directly */
+      this.component.turen.recoverPausedOnAwaken()
+    )
+}
+
+// MARK: - END Interception

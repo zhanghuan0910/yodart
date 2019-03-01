@@ -4,12 +4,14 @@ var logger = require('logger')('wormhole')
 var AudioManager = require('@yoda/audio').AudioManager
 var _ = require('@yoda/util')._
 var ChildProcess = require('child_process')
+var url = require('url')
 
 var config = require('/etc/yoda/wormhole.json')
 
 module.exports = Wormhole
 function Wormhole (runtime) {
   this.runtime = runtime
+  this.component = runtime.component
   this.config = config
   if (this.config.handlers == null) {
     this.config.handlers = {}
@@ -35,7 +37,15 @@ Wormhole.prototype.messageHandler = function messageHandler (topic, text) {
         logger.error('Malformed descriptor, options is not an object.', descriptor)
         return
       }
-      return this.runtime.openUrl(descriptor.url, options)
+      var urlObject = url.parse(descriptor.url, true)
+      urlObject.search = null
+      urlObject.query.__topic = topic
+      urlObject.query.__text = text
+      /**
+       * urlObject is instance of UrlObject.
+       * Should be fine with parsing with `url.parse`.
+       */
+      return this.runtime.openUrl(urlObject, options)
         .catch(err => {
           logger.error(`Unexpected error on opening url '${descriptor.url}'`, err && err.message, err && err.stack)
         })
@@ -91,14 +101,18 @@ Wormhole.prototype.handlers = {
    * @member asr
    */
   asr: function (asr) {
-    this.component.flora.getNlpResult(asr, (err, nlp, action) => {
-      if (err) {
-        logger.error('occurrs some error in speechT', err)
-      } else {
-        logger.info('MQTT command: get nlp result for asr', asr, nlp, action)
-        this.runtime.onVoiceCommand(asr, nlp, action)
-      }
-    })
+    this.component.flora.getNlpResult(asr)
+      .then(
+        res => {
+          var nlp = res[0]
+          var action = res[1]
+          logger.info('MQTT command: get nlp result for asr', asr, nlp, action)
+          return this.runtime.onVoiceCommand(asr, nlp, action)
+        },
+        err => {
+          logger.error('occurrs some error in speechT', err)
+        }
+      )
   },
   /**
    * @member cloud_forward
@@ -133,6 +147,9 @@ Wormhole.prototype.handlers = {
       this.runtime.openUrl(`yoda-skill://volume/set_volume?value=${msg.music}`, { preemptive: false })
     }
   },
+  get_battery: function () {
+    this.sendToApp('get_battery', this.component.battery.getWormholeResponse())
+  },
   /**
    * @member sys_update_available
    */
@@ -144,19 +161,36 @@ Wormhole.prototype.handlers = {
    * @member reset_settings
    */
   reset_settings: function (data) {
+    /**
+     * RESET_OK = "0"
+     * RESET_FAILED_NOPOWER = "1"
+     * RESET_FAILED_SYS_LAUNCHING = "2"
+     * RESET_FAILED_SYS_SLEEP = "3"
+     * RESET_FAILED_SYS_OFF = "4"
+     * RESET_FAILED_SYS_UNKNOWN = "-1"
+     */
+    var result = '0'
+    if (this.runtime.hibernated) {
+      result = '3'
+    }
+    this.sendToApp('reset_settings', result)
+    if (result !== '0') {
+      /** No operations should be performed on not ok result */
+      return
+    }
     this.runtime.onResetSettings()
   },
   /**
    * @member custom_config
    */
   custom_config: function (data) {
-    this.runtime.component.customConfig.onCustomConfig(data)
+    this.component.customConfig.onCustomConfig(data)
   },
   /**
    * @member custom_config_v2
    */
   custom_config_v2: function (data) {
-    this.runtime.component.customConfig.onCustomConfig(data)
+    this.component.customConfig.onCustomConfig(data)
   },
   /**
    * @member event
@@ -192,12 +226,32 @@ Wormhole.prototype.sendToApp = function sendToApp (topic, data) {
   return Promise.resolve()
 }
 
+/**
+ * Abort MQTT connection if possible.
+ *
+ * > Possible next step: Wormhole.prototype.setOnline
+ */
 Wormhole.prototype.setOffline = function setOffline () {
   if (this.mqtt == null) {
+    logger.info('mqtt client not initialized, skip setOffline')
     return
   }
   logger.info('disconnecting mqtt proactively')
   this.mqtt.suspend()
+}
+
+/**
+ * Establish MQTT connection if possible.
+ *
+ * > Possible next step: Wormhole.prototype.setOffline
+ */
+Wormhole.prototype.setOnline = function setOnline () {
+  if (this.mqtt == null) {
+    logger.info('mqtt client not initialized, skip setOnline')
+    return
+  }
+  logger.info('connecting mqtt proactively')
+  this.mqtt.start({ forceRefresh: true, forceReconnect: true })
 }
 
 Wormhole.prototype.updateVolume = function updateVolume () {
@@ -237,5 +291,5 @@ Wormhole.prototype.handleAppEvent = function handleAppEvent (data) {
       }
     }
   }
-  this.runtime.onVoiceCommand('', mockNlp, mockAction)
+  this.runtime.onVoiceCommand('', mockNlp, mockAction, { preemptive: false })
 }

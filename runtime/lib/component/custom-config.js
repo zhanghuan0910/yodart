@@ -3,13 +3,21 @@ var logger = require('logger')('custom-config-runtime')
 var config = require('/etc/yoda/custom-config.json')
 var querystring = require('querystring')
 var safeParse = require('@yoda/util').json.safeParse
+var EventEmitter = require('events')
+var property = require('@yoda/property')
 
 /**
  * handle all custom-config
  */
-class CustomConfig {
+class CustomConfig extends EventEmitter {
   constructor (runtime) {
+    super()
     this.runtime = runtime
+    this.runtime.component.lifetime.on('eviction', (appId, form) => {
+      if (form === 'cut' && property.get('persist.sys.pickupswitch') === 'open') {
+        this.runtime.setPickup(true, 6000, false)
+      }
+    })
   }
 
   /**
@@ -90,7 +98,16 @@ class CustomConfig {
     var configObj = safeParse(config)
     this.intercept(configObj)
     var sConfig = JSON.stringify(configObj)
-    this.runtime.openUrl(`yoda-skill://custom-config/firstLoad?config=${sConfig}`)
+    this.runtime.openUrl(`yoda-skill://custom-config/firstLoad?config=${sConfig}`,
+      { preemptive: false })
+  }
+
+  /**
+   * Interception system resume from sleep
+   */
+  runtimeDidResumeFromSleep () {
+    return this.runtime.openUrl('yoda-skill://custom-config/reload',
+      { preemptive: false })
   }
 }
 

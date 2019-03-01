@@ -4,6 +4,7 @@ var logger = require('logger')('lightService')
 var LightRenderingContextManager = require('./effects')
 var AudioManager = require('@yoda/audio').AudioManager
 var MediaPlayer = require('@yoda/multimedia').MediaPlayer
+var helper = require('./helper')
 var light = require('@yoda/light')
 
 var LIGHT_SOURCE = '/opt/light/'
@@ -33,7 +34,6 @@ function Light () {
   this.nextResumeTimer = null
   this.degree = 0
   this.uriHandlers = {}
-  this.userspaceZIndex = new Array(maxUserspaceLayers)
   this.init()
 }
 
@@ -41,20 +41,8 @@ Light.prototype.init = function () {
   // load awake uri by default
   var awakeURI = '/opt/light/awake.js'
   this.uriHandlers[awakeURI] = require(awakeURI)
-  var layers = 0
-  Object.keys(this.systemspace).forEach((key) => {
-    // find max layer
-    if (this.systemspace[key] > layers) {
-      layers = this.systemspace[key]
-    }
-  })
-  if (layers + 1 > maxSystemspaceLayers) {
-    layers = maxSystemspaceLayers
-  } else {
-    layers = layers + 1
-  }
-  this.systemspaceZIndex = new Array(layers)
-  this.setHide()
+
+  this.reset()
 }
 
 Light.prototype.getContext = function () {
@@ -152,7 +140,10 @@ Light.prototype.loadfile = function (appId, uri, data, option, callback) {
       if (option.shouldResume === true) {
         this.setResume(appId, isSystemUri, zIndex, uri, data)
       }
-      return callback()
+      if (callback) {
+        callback()
+      }
+      return false
     }
 
     // FIXME: delete handlers that are not used for a long time
@@ -172,7 +163,9 @@ Light.prototype.loadfile = function (appId, uri, data, option, callback) {
       this.prevCallback = function noop () {
         logger.warn(`light ${uri} should not call callback because it will resume`)
       }
-      callback()
+      if (callback) {
+        callback()
+      }
     } else {
       // this function can only be called once
       this.prevCallback = dedup(() => {
@@ -181,7 +174,9 @@ Light.prototype.loadfile = function (appId, uri, data, option, callback) {
           // this.clearPrev()
           this.resume()
         }, 0)
-        callback()
+        if (callback) {
+          callback()
+        }
       })
     }
     if (option.shouldResume === true) {
@@ -195,9 +190,13 @@ Light.prototype.loadfile = function (appId, uri, data, option, callback) {
     this.prevUri = uri
     this.prevZIndex = zIndex
     this.prevAppId = appId
+    return true
   } catch (error) {
     logger.error(`load effect file error from path: ${uri}`, error)
-    callback(error)
+    if (callback) {
+      callback(error)
+    }
+    return false
   }
 }
 
@@ -453,35 +452,11 @@ Light.prototype.stopFile = function (appId, uri) {
   }
 }
 
-Light.prototype.setAwake = function (appId) {
-  var uri = '/opt/light/awake.js'
-  this.loadfile(appId, uri, {}, {}, function noop (error) {
-    if (error) {
-      logger.error('setAwake error', error)
-    } else {
-      logger.log('setAwake complete')
-    }
-  })
-}
-
-Light.prototype.setDegree = function (appId, degree) {
-  var uri = '/opt/light/awake.js'
-  if (this.prevUri && this.prevUri === uri) {
-    this.degree = +degree
-    this.loadfile(appId, uri, {
-      degree: this.degree
-    }, {}, function noop (error) {
-      if (error) {
-        logger.error('setDegree error', error)
-      } else {
-        logger.log('setDegree complete')
-      }
-    })
-  }
-}
-
-Light.prototype.setHide = function () {
-  logger.log('set hide')
+Light.prototype.reset = function () {
+  logger.warn('RESET Lightd. This action will reset the service to the initialization state.')
+  var Maxlayer = helper.getMaxLayer(this.systemspace, maxSystemspaceLayers)
+  this.systemspaceZIndex = new Array(Maxlayer)
+  this.userspaceZIndex = new Array(maxUserspaceLayers)
   this.stopPrev(false)
 }
 
@@ -557,21 +532,6 @@ Light.prototype.stopPrevSound = function () {
     }
   }
   return true
-}
-
-Light.prototype.setPickup = function (appId, duration, withAwaken) {
-  var uri = `${LIGHT_SOURCE}setPickup.js`
-  this.loadfile(appId, uri, {
-    degree: this.degree,
-    duration: +duration,
-    withAwaken: withAwaken
-  }, {}, function complete (err) {
-    if (err) {
-      logger.error(`setPickup error: ${err.message}`)
-    } else {
-      logger.log('setPickup complete')
-    }
-  })
 }
 
 module.exports = Light
