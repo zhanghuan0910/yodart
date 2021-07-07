@@ -8,7 +8,9 @@ var util = require('util')
  * The above command would starts a tcp server on the port 8000 for logs.
  */
 var native
-if (process.platform === 'darwin' || process.env.NODE_ENV === 'unittest') {
+try {
+  native = require('./logger.node')
+} catch (e) {
   console.log('/** using stdout as @yoda/logger output target. */')
   var consoleLevels = [
     () => {}, /** none */
@@ -26,8 +28,6 @@ if (process.platform === 'darwin' || process.env.NODE_ENV === 'unittest') {
       fn(`${new Date().toISOString()} [${level.toUpperCase()}] <${tag}>`, line)
     }
   }
-} else {
-  native = require('./logger.node')
 }
 
 var logLevels = {
@@ -144,3 +144,8 @@ module.exports.setGlobalUploadLevel = function (level, authorization) {
 }
 
 module.exports.levels = logLevels
+
+module.exports.syslog = function syslog (message, priority, identity) {
+  priority = priority == null ? /** LOG_DEBUG */7 : priority
+  native.syslog(identity, priority, message)
+}

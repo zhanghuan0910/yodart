@@ -1,25 +1,44 @@
 'use strict'
 
+var path = require('path')
 var logger = require('logger')('ext-app-client')
 var translator = require('./translator-ipc')
+var flora = require('@yoda/flora')
+var endoscope = require('@yoda/endoscope')
+var FloraExporter = require('@yoda/endoscope/exporter/flora')
+var pony = require('@yoda/oh-my-little-pony')
+var mkdirpSync = require('@yoda/util/fs').mkdirpSync
+
+var apiSymbol = Symbol.for('yoda#api')
 
 module.exports = {
   main: main,
-  getActivityDescriptor: getActivityDescriptor,
   launchApp: launchApp,
-  keepAlive: keepAlive,
-  stopAlive: stopAlive
+  keepAlive: keepAlive
+}
+
+function terminate () {
+  /**
+   * FIXME: https://github.com/yodaos-project/ShadowNode/issues/373
+   * force process to exit without any proceeding.
+   */
+  process.kill(process.pid, 'SIGKILL')
 }
 
 process.once('disconnect', () => {
   logger.info('IPC disconnected, exiting self.')
-  process.exit(233)
+  terminate()
 })
 
-function main (target, runner) {
+function safeCall (agent, name, msg, target) {
+  return agent.call(name, msg, target, 10 * 1000)
+    .catch(err => logger.error(`unexpected error on invoking ${target}#${name}`, err.stack))
+}
+
+function main (target, descriptorPath, runner) {
   if (!target) {
     logger.error('Target is required.')
-    process.exit(-1)
+    terminate()
   }
   if (runner == null) {
     runner = noopRunner
@@ -29,88 +48,85 @@ function main (target, runner) {
   logger.log(`load target: ${target}/package.json`)
   var appId = pkg.name
   logger = require('logger')(`entry-${appId}`)
+  endoscope.addExporter(new FloraExporter('yodaos.endoscope.export'))
 
   var main = `${target}/${pkg.main || 'app.js'}`
-  var handle = require(main)
-  logger.log(`load main: ${main}`)
 
-  keepAlive(appId)
-  getActivityDescriptor(appId)
-    .then(descriptor => {
-      translator.setLogger(require('logger')(`@ipc-${process.pid}`))
-      var activity = translator.translate(descriptor)
-      activity.appHome = target
+  var agent = new flora.Agent(`unix:/var/run/flora.sock#${appId}:${process.pid}`)
+  agent.start()
 
-      /**
-       * Executes app's main function
-       */
-      launchApp(handle, activity)
-      runner(appId, pkg, activity)
+  keepAlive(agent, appId)
+  var descriptor = require(descriptorPath)
 
-      process.send({
-        type: 'status-report',
-        status: 'ready'
-      })
-    }).catch(error => {
+  // FIXME: unref should be enabled on https://github.com/yodaos-project/ShadowNode/issues/517 got fixed.
+  // aliveInterval.unref()
+  translator.setLogger(require('logger')(`@ipc-${process.pid}`))
+  var api = translator.translate(descriptor, agent)
+  api.appId = appId
+  api.appHome = target
+  api.appDataDir = path.join('/data/AppData', appId)
+  api.agent = agent
+  global[apiSymbol] = api
+
+  mkdirpSync(api.appDataDir)
+  pony.catchUncaughtError(path.join(api.appDataDir, 'exception.stack'), () => {
+    process.exit(1)
+  })
+
+  try {
+    /**
+     * Executes app's main function
+     */
+    launchApp(main, api)
+  } catch (error) {
+    logger.error('fatal error:', error.stack)
+    return safeCall(agent, 'yodaos.fauna.status-report', ['error', error.stack], 'runtime')
+      .then(terminate)
+  }
+
+  agent.call('yodaos.fauna.status-report', ['ready'], 'runtime', 10 * 1000)
+
+  /**
+   * Force await on app initialization.
+   */
+  Promise.resolve()
+    .then(() => onceAppCreated(api))
+    .then(() => runner(appId, pkg))
+    .catch(error => {
       logger.error('fatal error:', error.stack)
-      process.send({
-        type: 'status-report',
-        status: 'error',
-        error: error.message,
-        stack: error.stack
-      })
+      return safeCall(agent, 'yodaos.fauna.status-report', ['error', error.stack], 'runtime')
+        .then(terminate)
     })
 }
 
-function getActivityDescriptor (appId) {
-  return new Promise((resolve, reject) => {
-    process.on('message', onMessage)
-    process.send({
-      type: 'status-report',
-      status: 'initiating',
-      appId: appId
-    })
-
-    function onMessage (message) {
-      if (message.type !== 'descriptor') {
-        return
-      }
-      if (typeof message.result !== 'object') {
-        process.removeListener('message', onMessage)
-        return reject(new Error('Nil result on message descriptor.'))
-      }
-      process.removeListener('message', onMessage)
-      resolve(message.result)
-    }
+function onceAppCreated (api) {
+  return new Promise(resolve => {
+    api.once('created', resolve)
   })
 }
 
-function launchApp (handle, activity) {
+function launchApp (main, activity) {
+  logger.log(`loading app: '${main}'`)
+  var handle = require(main)
   /** start a new clean context */
-  handle(activity)
+  if (typeof handle === 'function') {
+    handle(activity)
+  }
 }
 
 var aliveInterval
-function keepAlive (appId) {
-  /**
-   * FIXME: though there do have listeners on process#message,
-   * ShadowNode still exits on end of current context.
-   * Yet this process should be kept alive and waiting for life
-   * cycle events.
-   */
+function keepAlive (agent) {
+  if (aliveInterval) {
+    clearInterval(aliveInterval)
+  }
+  setAlive(agent)
   aliveInterval = setInterval(() => {
-    process.send({ type: 'ping' })
+    setAlive(agent)
   }, 5 * 1000)
-  process.on('message', message => {
-    if (message.type === 'pong') {
-      logger.info('Received pong from VuiDaemon.')
-      stopAlive()
-    }
-  })
 }
 
-function stopAlive () {
-  clearInterval(aliveInterval)
+function setAlive (agent) {
+  safeCall(agent, 'yodaos.fauna.status-report', ['alive'], 'runtime')
 }
 
 function noopRunner () {

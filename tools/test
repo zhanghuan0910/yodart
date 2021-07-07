@@ -3,49 +3,65 @@ set -e -o pipefail
 
 help="
 Usage:
-  -l                  run tests on local machine
-  -p <pattern>        test file pattern, defaults to '$pattern'
-  --reporter <name>   test result reporter, no reporter by default
-  -s                  Select which device to be installed on if multiple devices presents.
+  -l, --local                  run tests on local machine
+  --reporter <name>            test result reporter, no reporter by default
+  -s, --serial                 select which device to be installed on if multiple devices presents
+
+  -p, --pattern <pattern>      test files pattern, would disable --testset options and default testset
+  --testset <testsets>         run testset in addition to 'test/testset.txt'
+
+  --node-path <path>           run test with the NODE_PATH environ
+  --manifest <path>            run test with the manifest.json
 
 Example:
-  $ ./tools/test --reporter tap-nyan --pattern '**/*.test.js'
+  $ ./tools/test --reporter tap-spec --pattern '**/*.test.js'
 "
 
+testsets=('test/testsets.txt')
+manifest=''
 patternPrefix='/data/workspace/test/'
-pattern="**/*.test.js"
+patterns=""
 reporter="cat"
-coverage=""
+coverageDir=""
 timeout=""
 local="NO"
 sn=""
+node_path="$(pwd)/packages"
 while [ $# -gt 0 ]; do
   case "$1" in
-    -p)
-      pattern="$2"
+    -p|--pattern)
+      patterns="$2"
+      shift
+      ;;
+    --testset)
+      testsets+=("$2")
       shift
       ;;
     --reporter)
       reporter="./node_modules/.bin/$2"
       shift
       ;;
-    -l)
+    -l|--local)
       local="YES"
       ;;
-    -s)
+    -s|--serial)
       sn="$2"
       shift
       ;;
-    --help)
+    --node-path)
+      node_path="$2"
+      shift
+      ;;
+    --manifest)
+      manifest="$2"
+      shift
+      ;;
+    -h|--help)
       printf "$help"
       exit
       ;;
-    -h)
-      printf "$help"
-      exit
-      ;;
-    --coverage)
-      coverage="--coverage $2"
+    --coverage-dir)
+      coverageDir="$2"
       shift
       ;;
     --timeout)
@@ -59,18 +75,27 @@ while [ $# -gt 0 ]; do
   shift $(( $# > 0 ? 1 : 0 ))
 done
 
+if test -z "$patterns"; then
+  patterns="$(cat ${testsets[@]})"
+fi
+
+pre_scripts=""
+
 if test "$local" = "YES"; then
-  export NODE_PATH="$(pwd)/packages"
+  export NODE_PATH="$node_path"
+  export YODA_RUN_MODE=host
+  export YODA_MANIFEST="$manifest"
+  export NODE_ENV=unittest
 
   patternPrefix="$(pwd)/test/"
-  scripts="$patternPrefix$pattern"
 
-  cmd='iotjs ./node_modules/tape/bin/tape.js '
+  cmd='iotjs ./packages/tape/bin/tape.js '
 else
-  scripts="
+  pre_scripts="
 export BLUETOOTH_CHANNEL_PREFIX=/tmp;
+export YODA_MANIFEST=$manifest
 export NODE_ENV=unittest;
-iotjs /usr/lib/node_modules/tape/bin/tape.js '$patternPrefix$pattern'
+iotjs /usr/lib/node_modules/tape/bin/tape.js
 "
   if test "$sn" != ""; then
     cmd="adb -s $sn shell"
@@ -79,4 +104,23 @@ iotjs /usr/lib/node_modules/tape/bin/tape.js '$patternPrefix$pattern'
   fi
 fi
 
-$cmd $scripts $coverage $timeout | $reporter
+IFS=$'\n' patterns=($patterns)
+unset IFS
+
+if ! test -z "$coverageDir"; then
+  mkdir -p $coverageDir
+fi
+for pattern in "${patterns[@]}"; do
+  if test -z "$pattern"; then
+    continue
+  fi
+  if [[ "$pattern" == \#* ]]; then
+    continue
+  fi
+  printf "# $patternPrefix$pattern\n"
+  coverageOpt=""
+  if ! test -z "$coverageDir"; then
+    coverageOpt="--coverage $coverageDir/$(echo $pattern | md5sum - | awk '{ print $1 }').json"
+  fi
+  $cmd $pre_scripts $coverageOpt $timeout "$patternPrefix$pattern" | $reporter
+done

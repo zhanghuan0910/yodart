@@ -29,6 +29,15 @@ var stateFilters = [
       return {'address': msg.connect_address, 'name': msg.connect_name}
     }
   },
+  // re-connected to remote device succeeded
+  {
+    lastInflowMsg: {a2dpstate: 'opened', connect_state: 'connected', play_state: 'stopped', broadcast_state: 'closed'},
+    inflowMsg: {a2dpstate: 'opened', connect_state: 'connected', play_state: 'stopped', broadcast_state: 'closed'},
+    outflowEvent: {type: 'connection_state_changed', state: protocol.CONNECTION_STATE.CONNECTED},
+    extraDataGenerator: (msg) => {
+      return {'address': msg.connect_address, 'name': msg.connect_name}
+    }
+  },
   // disconnect from remote device
   {
     inflowMsg: {a2dpstate: 'opened', connect_state: 'disconnected', play_state: 'invalid', broadcast_state: 'opened'},
@@ -37,12 +46,18 @@ var stateFilters = [
   // connect to remote device failed
   {
     inflowMsg: {a2dpstate: 'opened', connect_state: 'connect failed'},
-    outflowEvent: {type: 'connection_state_changed', state: protocol.CONNECTION_STATE.CONNECT_FAILED}
+    outflowEvent: {type: 'connection_state_changed', state: protocol.CONNECTION_STATE.CONNECT_FAILED},
+    extraDataGenerator: (msg) => {
+      return {'address': msg.connect_address, 'name': msg.connect_name}
+    }
   },
   // auto connect to history paired device failed
   {
     inflowMsg: {a2dpstate: 'opened', connect_state: 'connect over'},
-    outflowEvent: {type: 'connection_state_changed', state: protocol.CONNECTION_STATE.AUTOCONNECT_FAILED}
+    outflowEvent: {type: 'connection_state_changed', state: protocol.CONNECTION_STATE.AUTOCONNECT_FAILED},
+    extraDataGenerator: (msg) => {
+      return {'address': msg.connect_address, 'name': msg.connect_name}
+    }
   },
   // started music
   {

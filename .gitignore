@@ -10,3 +10,16 @@ node_modules/
 website/docs/
 test/config.json
 test/.result
+test/temp/*
+!test/temp/.gitkeep
+build
+out
+vendor
+.nyc_output
+.coverage-workspace
+coverage
+
+runtime/client/api/*
+!runtime/client/api/.gitkeep
+client/c/include/yodaos_api_container.h
+client/c/include/yodaos_apis.h
